@@ -1,0 +1,6 @@
+# Exclude Python backend from language detection
+app/**/*.py linguist-detectable=false
+tests/**/*.py linguist-detectable=false
+benchmarks/**/*.py linguist-detectable=false
+scripts/**/*.py linguist-detectable=false
+conftest.py linguist-detectable=false
