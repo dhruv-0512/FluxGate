@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+.venv/
+.venv*/
+
+# Tests and caches
+.pytest_cache/
+.cache/
+
+# Environment and local config
+.env
+.env.*
+config.yaml
+
+# Node
+node_modules/
+
+# OS
+.DS_Store
+Thumbs.db

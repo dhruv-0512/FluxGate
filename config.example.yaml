@@ -1,0 +1,35 @@
+server:
+  host: "0.0.0.0"
+  port: 8080
+  ws_port: 8081
+
+redis:
+  url: "redis://localhost:6379"
+
+postgres:
+  url: "postgresql+asyncpg://user:password@localhost:5433/fluxgate"
+
+rules:
+  - name: "default_api"
+    key_pattern: "api:*"
+    algorithm: sliding_window
+    limit: 100
+    window_seconds: 60
+
+  - name: "login_endpoint"
+    key_pattern: "route:/api/login:*"
+    algorithm: token_bucket
+    capacity: 5
+    refill_rate: 0.1
+
+  - name: "premium_users"
+    key_pattern: "user:premium:*"
+    algorithm: sliding_window
+    limit: 1000
+    window_seconds: 60
+
+  - name: "ip_global"
+    key_pattern: "ip:*"
+    algorithm: leaky_bucket
+    rate: 50
+    burst: 10

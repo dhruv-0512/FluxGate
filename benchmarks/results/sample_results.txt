@@ -1,0 +1,66 @@
+FluxGate Algorithm Benchmark — 500 req per algorithm
+─────────────────────────────────────────────────────────────────
+  Algorithm                       p50    p95    p99    min    max
+─────────────────────────────────────────────────────────────────
+  token_bucket                  11.49ms  24.19ms  52.29ms   8.09ms  232.23ms
+  sliding_window                12.27ms  24.56ms  83.41ms   8.25ms  201.70ms
+  sliding_window_counter        14.84ms  28.84ms  62.21ms   9.03ms  126.86ms
+  leaky_bucket                  13.83ms  34.49ms  50.14ms   9.12ms   60.30ms
+
+FluxGate Concurrency Stress Test
+═══════════════════════════════════════════════════════
+
+  5 clients x 100 req — sliding_window
+  Total requests : 500
+  Allowed        : 500
+  Rejected       : 0
+  Rejection rate : 0.0%
+  Duration       : 1.20s
+  Throughput     : 416.0 req/sec
+  Latency p50    : 6.91ms
+  Latency p95    : 18.36ms
+  Latency p99    : 126.66ms
+
+  20 clients x 200 req — sliding_window
+  Total requests : 4000
+  Allowed        : 1500
+  Rejected       : 2500
+  Rejection rate : 62.5%
+  Duration       : 9.04s
+  Throughput     : 442.5 req/sec
+  Latency p50    : 41.49ms
+  Latency p95    : 72.22ms
+  Latency p99    : 88.98ms
+
+  50 clients x 100 req — sliding_window
+  Total requests : 5000
+  Allowed        : 3000
+  Rejected       : 2000
+  Rejection rate : 40.0%
+  Duration       : 9.15s
+  Throughput     : 546.7 req/sec
+  Latency p50    : 80.05ms
+  Latency p95    : 124.40ms
+  Latency p99    : 280.05ms
+
+  20 clients x 100 req — token_bucket
+  Total requests : 2000
+  Allowed        : 2000
+  Rejected       : 0
+  Rejection rate : 0.0%
+  Duration       : 2.80s
+  Throughput     : 714.2 req/sec
+  Latency p50    : 22.85ms
+  Latency p95    : 48.07ms
+  Latency p99    : 111.92ms
+
+  20 clients x 100 req — leaky_bucket
+  Total requests : 2000
+  Allowed        : 2000
+  Rejected       : 0
+  Rejection rate : 0.0%
+  Duration       : 3.69s
+  Throughput     : 541.7 req/sec
+  Latency p50    : 30.44ms
+  Latency p95    : 61.90ms
+  Latency p99    : 142.41ms
