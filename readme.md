@@ -1,47 +1,48 @@
-````markdown
 # FluxGate
 
-A distributed rate limiting service built with FastAPI and Redis. Supports four algorithms with atomic Redis Lua scripts, a real-time WebSocket dashboard, Postgres audit logging, and hot config reload no restart required.
-
-Built as a systems engineering project to demonstrate distributed backend design, concurrency, and infrastructure engineering.
+A distributed rate limiting service with four algorithms, atomic Redis Lua enforcement, hot config reload, and a real-time WebSocket dashboard.
 
 ---
 
-## Demo
+## Why FluxGate
 
-![Dashboard](./docs/dashboard.png)
-
-> 20 concurrent clients, 4000 total requests, per-key enforcement enforcing exactly 100 req/window per user.
+Most rate limiters bolt on a single algorithm and call it done. FluxGate ships four — because token bucket, sliding window, and leaky bucket solve fundamentally different problems, and a real production service shouldn't be forced to pick one globally. Every algorithm runs through Redis Lua scripts for atomic check-and-update, eliminating the race condition that plagues naïve implementations.
 
 ---
 
 ## Features
 
-- **4 rate limiting algorithms** — token bucket, sliding window log, sliding window counter, leaky bucket
-- **Redis Lua scripts** — atomic check-and-update, zero race conditions
-- **Per-key limits** — enforce by user ID, IP, route, or any arbitrary key
-- **Hot config reload** — edit `config.yaml`, changes apply instantly with no restart
-- **Real-time dashboard** — WebSocket feed, live RPS, acceptance rate gauge, top throttled keys table
-- **Postgres analytics** — every request logged, per-key history, global stats
-- **Load tested** — 4000+ requests across 20 concurrent clients
+- **4 algorithms** — token bucket, sliding window log, sliding window counter, leaky bucket
+- **Atomic Redis Lua scripts** — single-operation check-and-update, zero race conditions under concurrency
+- **Per-key enforcement** — scope limits by user ID, IP, route, or any arbitrary key
+- **Hot config reload** — edit `config.yaml`, changes apply instantly with no restart required
+- **Live WebSocket dashboard** — real-time RPS, acceptance rate gauge, top throttled keys
+- **PostgreSQL audit log** — every request recorded; per-key history and global stats queryable
+- **Load tested** — 4,000+ requests across 20 concurrent clients at 442 req/sec
 
 ---
 
 ## Algorithms
 
 ### Token Bucket
-Fixed capacity bucket per key. Tokens refill at a constant rate. Allows controlled bursts up to capacity. Best for APIs that need to tolerate short traffic spikes.
+Fixed-capacity bucket per key. Tokens refill at a constant rate, allowing controlled bursts up to capacity. Best for APIs that need to tolerate short traffic spikes without hard-dropping requests.
 
 ### Sliding Window Log
-Stores exact request timestamps in a Redis sorted set. Prunes entries outside the window on every request. Exact enforcement — no edge case double-spending. Best for strict per-second limits.
+Stores exact request timestamps in a Redis sorted set, pruning entries outside the window on each request. Exact enforcement with no edge-case double-spending. Best for strict per-second limits.
 
 ### Sliding Window Counter
-Weighted approximation using two adjacent fixed windows. Memory efficient compared to the log variant. Formula: `count = prev_count × (1 - elapsed_ratio) + curr_count`. Best for high throughput APIs.
+Weighted approximation using two adjacent fixed windows:
+
+```
+count = prev_count × (1 - elapsed_ratio) + curr_count
+```
+
+Memory-efficient compared to the log variant. Best for high-throughput APIs where approximate enforcement is acceptable.
 
 ### Leaky Bucket
-Requests enter a queue and drain at a fixed rate. Smooths bursty traffic into a steady stream. Best for protecting downstream services from sudden load spikes.
+Requests enter a queue and drain at a fixed rate, smoothing bursty traffic into a steady stream. Best for protecting downstream services from sudden load spikes.
 
-All four algorithms use **Redis Lua scripts** for atomic read-modify-write. This eliminates the race condition that exists when check and update are separate network calls.
+All four algorithms use **Redis Lua scripts** for atomic read-modify-write. Without this, two concurrent requests can both read `tokens_available = 1`, both pass the check, and both decrement — silently doubling the allowed limit. Lua scripts execute as a single atomic operation on the Redis server, no locks needed.
 
 ---
 
@@ -49,9 +50,9 @@ All four algorithms use **Redis Lua scripts** for atomic read-modify-write. This
 
 ```
 Client → FastAPI → Rate Limiter → Redis (Lua atomic ops)
-                        ↓
+                        │
                    PostgreSQL (audit log)
-                        ↓
+                        │
                  React Dashboard (WebSocket)
 ```
 
@@ -62,9 +63,9 @@ fluxgate/
 │   ├── redis/            # client + Lua scripts
 │   ├── api/              # HTTP routes + WebSocket
 │   ├── config/           # config loader + hot reload watcher
-│   ├── analytics/        # Postgres models + queries
+│   ├── analytics/        # PostgreSQL models + queries
 │   ├── metrics/          # in-memory rolling window collector
-│   └── main.py           # FastAPI app + lifespan
+│   └── main.py
 ├── dashboard/            # React + Vite + Recharts
 ├── scripts/
 │   └── loadtest.py
@@ -80,7 +81,7 @@ fluxgate/
 | Backend | Python, FastAPI, uvicorn |
 | Rate limiting | Redis 7, Lua scripts |
 | Analytics | PostgreSQL 15, asyncpg |
-| Config reload | Watchdog (fsnotify equivalent) |
+| Config reload | Watchdog |
 | Dashboard | React, Vite, Recharts, Lucide |
 | Containerization | Docker |
 
@@ -91,82 +92,37 @@ fluxgate/
 **Prerequisites:** Docker, Python 3.11+, Node 18+
 
 ```bash
-# 0. create local config and env files
-copy config.example.yaml config.yaml
-copy .env.example .env
+# 1. Copy config and env files
+cp config.example.yaml config.yaml
+cp .env.example .env
 
-# 1. start redis and postgres
+# 2. Start Redis and PostgreSQL
 docker run -d -p 6379:6379 redis:7-alpine
-docker run -d -e POSTGRES_DB=fluxgate -e POSTGRES_USER=admin -e POSTGRES_PASSWORD=change_me -p 5432:5432 postgres:15
+docker run -d \
+  -e POSTGRES_DB=fluxgate \
+  -e POSTGRES_USER=admin \
+  -e POSTGRES_PASSWORD=change_me \
+  -p 5432:5432 postgres:15
 
-# 2. install python deps
+# 3. Install Python dependencies
 pip install -r requirements.txt
 
-# 3. start backend
+# 4. Start the backend
 python -m app.main
 
-# 4. start dashboard (separate terminal)
-cd dashboard
-npm install
-npm run dev
+# 5. Start the dashboard (separate terminal)
+cd dashboard && npm install && npm run dev
 ```
 
 Open `http://localhost:5173`
 
-Local secrets should live in `config.yaml` and `.env`, which are ignored by git.
-
----
-
-## API Reference
-
-### Check rate limit
-```
-POST /v1/check
-{
-  "key": "user:123",
-  "algorithm": "sliding_window",
-  "n": 1
-}
-```
-
-Response:
-```json
-{
-  "allowed": true,
-  "remaining": 43,
-  "reset_after_ms": 60000,
-  "retry_after_ms": 0,
-  "key": "user:123",
-  "algorithm": "sliding_window"
-}
-```
-
-### All endpoints
-```
-POST /v1/check              check rate limit for a key
-GET  /v1/status/{key}       current bucket state (non-consuming)
-POST /v1/reset/{key}        reset a key's state
-GET  /v1/metrics            global snapshot
-GET  /v1/metrics/{key}      per-key request history
-GET  /v1/rules              active config rules
-POST /v1/config/reload      hot reload config.yaml
-GET  /health                health check
-WS   /ws/metrics            live metrics stream (1s interval)
-```
-
-### Response headers
-Every response includes standard rate limit headers:
-```
-X-RateLimit-Remaining: 43
-X-RateLimit-Reset: 1716000000
-Retry-After: 3  (only on 429)
-```
+> Local secrets live in `config.yaml` and `.env` — both are gitignored.
 
 ---
 
 ## Configuration
 
-Create `config.yaml` from `config.example.yaml`, then edit it to define rules. Rules are matched by key pattern (glob syntax). Changes apply **instantly** without restarting the server.
+Rules are matched by key pattern (glob syntax). Changes to `config.yaml` apply **instantly** without restarting.
 
 ```yaml
 server:
@@ -207,15 +163,69 @@ rules:
 
 ---
 
+## API Reference
+
+### Check rate limit
+
+```
+POST /v1/check
+```
+
+```json
+{
+  "key": "user:123",
+  "algorithm": "sliding_window",
+  "n": 1
+}
+```
+
+Response:
+
+```json
+{
+  "allowed": true,
+  "remaining": 43,
+  "reset_after_ms": 60000,
+  "retry_after_ms": 0,
+  "key": "user:123",
+  "algorithm": "sliding_window"
+}
+```
+
+### All endpoints
+
+```
+POST /v1/check              Check rate limit for a key
+GET  /v1/status/{key}       Current bucket state (non-consuming)
+POST /v1/reset/{key}        Reset a key's state
+GET  /v1/metrics            Global snapshot
+GET  /v1/metrics/{key}      Per-key request history
+GET  /v1/rules              Active config rules
+POST /v1/config/reload      Hot reload config.yaml
+GET  /health                Health check
+WS   /ws/metrics            Live metrics stream (1s interval)
+```
+
+### Response headers
+
+Every response includes standard rate limit headers:
+
+```
+X-RateLimit-Remaining: 43
+X-RateLimit-Reset: 1716000000
+Retry-After: 3              # only on 429
+```
+
+---
+
 ## Load Testing
 
 ```bash
 python scripts/loadtest.py
 ```
 
-Fires 4000 requests across 20 concurrent clients (`user:0` through `user:19`), 200 requests per client. At default limits (100 req/60s per key), produces ~50% rejection rate.
+Fires 4,000 requests across 20 concurrent clients (`user:0` through `user:19`), 200 requests per client. At the default limit of 100 req/60s per key, produces ~50% rejection.
 
-Expected output:
 ```
 Allowed:        2000
 Rejected:       2000
@@ -225,23 +235,9 @@ Rejection rate: 50.0%
 
 ---
 
-## Key Design Decisions
-
-**Why Lua scripts?**
-Without atomicity, two concurrent requests can both read `tokens_available = 1`, both pass the check, and both decrement — allowing double the intended limit. Lua scripts execute as a single atomic operation on the Redis server, eliminating this race condition without locks.
-
-**Why four algorithms?**
-Each solves a different problem. Token bucket for burst tolerance. Sliding window log for exactness. Sliding window counter for memory efficiency at scale. Leaky bucket for downstream protection. A real service needs to pick the right tool per route.
-
-**Why hot reload?**
-Rate limit rules change frequently in production — during incidents, attacks, or scaling events. Requiring a restart to change a limit is unacceptable. Watchdog monitors `config.yaml` and swaps the config atomically on change.
-
----
 ## Benchmarks
 
-See [`benchmarks/`](./benchmarks) for full methodology and scripts.
-
-### Algorithm Latency (500 req each, local Redis)
+### Algorithm latency (500 requests each, local Redis)
 
 | Algorithm | p50 | p95 | p99 | min |
 |---|---|---|---|---|
@@ -250,17 +246,29 @@ See [`benchmarks/`](./benchmarks) for full methodology and scripts.
 | sliding_window_counter | 14.84ms | 28.84ms | 62.21ms | 9.03ms |
 | leaky_bucket | 13.83ms | 34.49ms | 50.14ms | 9.12ms |
 
-### Throughput (concurrent clients, sliding_window)
+### Throughput (sliding_window)
 
 | Clients | Requests | Throughput | Rejection Rate |
 |---|---|---|---|
 | 5 | 500 | 416 req/sec | 0% |
-| 20 | 4000 | 442 req/sec | 62.5% |
-| 50 | 5000 | 546 req/sec | 40% |
+| 20 | 4,000 | 442 req/sec | 62.5% |
+| 50 | 5,000 | 546 req/sec | 40% |
+
+---
+
+## Design Decisions
+
+**Why Lua scripts?**
+Without atomicity, two concurrent requests can both read `tokens_available = 1`, both pass, and both decrement — silently exceeding the limit. Lua scripts run as a single atomic unit on the Redis server, no distributed locks required.
+
+**Why four algorithms?**
+Each solves a distinct problem: token bucket for burst tolerance, sliding window log for exactness, sliding window counter for memory efficiency at scale, leaky bucket for downstream protection. One algorithm globally is the wrong abstraction.
+
+**Why hot reload?**
+Rate limit rules change during incidents, attacks, and scaling events. Requiring a restart to update a limit is a production liability. Watchdog monitors `config.yaml` and swaps the config atomically on save.
 
 ---
 
 ## License
 
 MIT
-````
