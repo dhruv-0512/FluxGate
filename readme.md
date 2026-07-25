@@ -4,73 +4,109 @@ A distributed rate limiting service with four algorithms, atomic Redis Lua enfor
 
 ---
 
+## Workflow
+
+```
+Client
+  |
+  v
+FastAPI (/v1/check)
+  |
+  v
+RATE LIMITER
+  Match key against config.yaml rules (glob pattern)
+  Select algorithm: token_bucket | sliding_window |
+                    sliding_window_counter | leaky_bucket
+  |
+  v
+REDIS (Lua script, atomic check-and-update)
+  Single round trip, no race condition, no distributed lock
+  |
+  +-------------------------+
+  |                         |
+  v                         v
+ALLOWED / REJECTED    PostgreSQL audit log
+  Response headers      per-key + global request history
+  X-RateLimit-*
+  |                         |
+  +-------------------------+
+              |
+              v
+   WebSocket /ws/metrics (1s interval)
+              |
+              v
+   React Dashboard
+   live RPS, acceptance rate, top throttled keys
+
+config.yaml  ---(Watchdog, hot reload)--->  RATE LIMITER
+   (no restart required, rules swap atomically on save)
+```
+
+---
+
+## Project Structure
+
+```
+fluxgate/
+├── app/
+│   ├── limiter/          4 algorithm implementations
+│   ├── redis/            client + Lua scripts
+│   ├── api/               HTTP routes + WebSocket
+│   ├── config/            config loader + hot reload watcher
+│   ├── analytics/         PostgreSQL models + queries
+│   ├── metrics/           in-memory rolling window collector
+│   └── main.py
+├── dashboard/             React + Vite + Recharts
+├── scripts/
+│   └── loadtest.py
+└── config.yaml
+```
+
+---
+
 ## Why FluxGate
 
-Most rate limiters bolt on a single algorithm and call it done. FluxGate ships four — because token bucket, sliding window, and leaky bucket solve fundamentally different problems, and a real production service shouldn't be forced to pick one globally. Every algorithm runs through Redis Lua scripts for atomic check-and-update, eliminating the race condition that plagues naïve implementations.
+Most rate limiters bolt on a single algorithm and call it done. FluxGate ships four, because token bucket, sliding window, and leaky bucket solve fundamentally different problems, and a real production service shouldn't be forced to pick one globally. Every algorithm runs through Redis Lua scripts for atomic check-and-update, eliminating the race condition that plagues naive implementations.
 
 ---
 
 ## Features
 
-- **4 algorithms** — token bucket, sliding window log, sliding window counter, leaky bucket
-- **Atomic Redis Lua scripts** — single-operation check-and-update, zero race conditions under concurrency
-- **Per-key enforcement** — scope limits by user ID, IP, route, or any arbitrary key
-- **Hot config reload** — edit `config.yaml`, changes apply instantly with no restart required
-- **Live WebSocket dashboard** — real-time RPS, acceptance rate gauge, top throttled keys
-- **PostgreSQL audit log** — every request recorded; per-key history and global stats queryable
-- **Load tested** — 4,000+ requests across 20 concurrent clients at 442 req/sec
+- Four algorithms: token bucket, sliding window log, sliding window counter, leaky bucket
+- Atomic Redis Lua scripts: single-operation check-and-update, zero race conditions under concurrency
+- Per-key enforcement: scope limits by user ID, IP, route, or any arbitrary key
+- Hot config reload: edit `config.yaml`, changes apply instantly with no restart required
+- Live WebSocket dashboard: real-time RPS, acceptance rate gauge, top throttled keys
+- PostgreSQL audit log: every request recorded, per-key history and global stats queryable
+- Load tested: 4,000+ requests across 20 concurrent clients at 442 req/sec
 
 ---
 
 ## Algorithms
 
 ### Token Bucket
+
 Fixed-capacity bucket per key. Tokens refill at a constant rate, allowing controlled bursts up to capacity. Best for APIs that need to tolerate short traffic spikes without hard-dropping requests.
 
 ### Sliding Window Log
+
 Stores exact request timestamps in a Redis sorted set, pruning entries outside the window on each request. Exact enforcement with no edge-case double-spending. Best for strict per-second limits.
 
 ### Sliding Window Counter
+
 Weighted approximation using two adjacent fixed windows:
 
 ```
-count = prev_count × (1 - elapsed_ratio) + curr_count
+count = prev_count * (1 - elapsed_ratio) + curr_count
 ```
 
-Memory-efficient compared to the log variant. Best for high-throughput APIs where approximate enforcement is acceptable.
+where `elapsed_ratio` is the fraction of the current window that has elapsed (time since window start divided by window duration). Memory-efficient compared to the log variant. Best for high-throughput APIs where approximate enforcement is acceptable.
 
 ### Leaky Bucket
+
 Requests enter a queue and drain at a fixed rate, smoothing bursty traffic into a steady stream. Best for protecting downstream services from sudden load spikes.
 
-All four algorithms use **Redis Lua scripts** for atomic read-modify-write. Without this, two concurrent requests can both read `tokens_available = 1`, both pass the check, and both decrement — silently doubling the allowed limit. Lua scripts execute as a single atomic operation on the Redis server, no locks needed.
-
----
-
-## Architecture
-
-```
-Client → FastAPI → Rate Limiter → Redis (Lua atomic ops)
-                        │
-                   PostgreSQL (audit log)
-                        │
-                 React Dashboard (WebSocket)
-```
-
-```
-fluxgate/
-├── app/
-│   ├── limiter/          # 4 algorithm implementations
-│   ├── redis/            # client + Lua scripts
-│   ├── api/              # HTTP routes + WebSocket
-│   ├── config/           # config loader + hot reload watcher
-│   ├── analytics/        # PostgreSQL models + queries
-│   ├── metrics/          # in-memory rolling window collector
-│   └── main.py
-├── dashboard/            # React + Vite + Recharts
-├── scripts/
-│   └── loadtest.py
-└── config.yaml
-```
+All four algorithms use Redis Lua scripts for atomic read-modify-write. Without this, two concurrent requests can both read `tokens_available = 1`, both pass the check, and both decrement, silently doubling the allowed limit. Lua scripts execute as a single atomic operation on the Redis server, with no locks needed.
 
 ---
 
@@ -89,7 +125,7 @@ fluxgate/
 
 ## Quick Start
 
-**Prerequisites:** Docker, Python 3.11+, Node 18+
+Prerequisites: Docker, Python 3.11+, Node 18+
 
 ```bash
 # 1. Copy config and env files
@@ -116,13 +152,13 @@ cd dashboard && npm install && npm run dev
 
 Open `http://localhost:5173`
 
-> Local secrets live in `config.yaml` and `.env` — both are gitignored.
+Local secrets live in `config.yaml` and `.env`, both gitignored.
 
 ---
 
 ## Configuration
 
-Rules are matched by key pattern (glob syntax). Changes to `config.yaml` apply **instantly** without restarting.
+Rules are matched by key pattern (glob syntax). Changes to `config.yaml` apply instantly without restarting.
 
 ```yaml
 server:
@@ -224,7 +260,7 @@ Retry-After: 3              # only on 429
 python scripts/loadtest.py
 ```
 
-Fires 4,000 requests across 20 concurrent clients (`user:0` through `user:19`), 200 requests per client. At the default limit of 100 req/60s per key, produces ~50% rejection.
+Fires 4,000 requests across 20 concurrent clients (`user:0` through `user:19`), 200 requests per client. At the default limit of 100 req/60s per key, this produces roughly 50% rejection.
 
 ```
 Allowed:        2000
@@ -258,14 +294,11 @@ Rejection rate: 50.0%
 
 ## Design Decisions
 
-**Why Lua scripts?**
-Without atomicity, two concurrent requests can both read `tokens_available = 1`, both pass, and both decrement — silently exceeding the limit. Lua scripts run as a single atomic unit on the Redis server, no distributed locks required.
+Why Lua scripts: without atomicity, two concurrent requests can both read `tokens_available = 1`, both pass, and both decrement, silently exceeding the limit. Lua scripts run as a single atomic unit on the Redis server, with no distributed locks required.
 
-**Why four algorithms?**
-Each solves a distinct problem: token bucket for burst tolerance, sliding window log for exactness, sliding window counter for memory efficiency at scale, leaky bucket for downstream protection. One algorithm globally is the wrong abstraction.
+Why four algorithms: each solves a distinct problem. Token bucket for burst tolerance, sliding window log for exactness, sliding window counter for memory efficiency at scale, leaky bucket for downstream protection. One algorithm globally is the wrong abstraction.
 
-**Why hot reload?**
-Rate limit rules change during incidents, attacks, and scaling events. Requiring a restart to update a limit is a production liability. Watchdog monitors `config.yaml` and swaps the config atomically on save.
+Why hot reload: rate limit rules change during incidents, attacks, and scaling events. Requiring a restart to update a limit is a production liability. Watchdog monitors `config.yaml` and swaps the config atomically on save.
 
 ---
 
